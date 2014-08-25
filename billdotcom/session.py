@@ -11,16 +11,18 @@ from .invoice import Invoice
 from .item import Item
 from .vendor import Vendor
 from .vendorcredit import VendorCredit
-from .config import CONFIG
+# removed the config module...
 from .https import https_post
 from .exceptions import BilldotcomError, ServerResponseError
 import copy
 import json
 
-class Session(object):
-    """This models and handles serialization of the Bill object.
+import requests
 
-    Your configuration should have the minimum requirements listed in :mod:`billdotcom.config`.
+class Session(object):
+    """
+    This models and handles serialization of the Bill object.
+
     Sessions will time out after 35 minutes.
 
     You can use it in a with statement:
@@ -39,16 +41,27 @@ class Session(object):
         'VendorCredit': VendorCredit
     }
 
-    def __init__(self, session_id=None):
+    def __init__(self, session_id=None, api_key=None, 
+                 username=None, password=None, org_id=None):
         self.session_id = session_id
-        self.appkey = CONFIG.get('authentication', 'appkey')
+        self.api_key = api_key 
+        self.username = username
+        self.password = password
+        self.org_id = org_id
 
+        if not self.session_id:
+            if self.org_id:
+                self.login()
+            else:
+                self.list_orgs()
+        
     def post(self, url, data={}, **kwargs):
         if not self.session_id:
-            raise BilldotcomError("cannot send POST request without logging in first")
+            error_msg = "cannot send POST request without logging in first"
+            raise BilldotcomError(error_msg)
 
         payload = dict(
-            devKey = self.appkey,
+            devKey = self.api_key,
             sessionId = self.session_id
         )
 
@@ -112,7 +125,8 @@ class Session(object):
         """
 
         if bdc_type not in self.type_map:
-            raise BilldotcomError('object type {} is not supported'.format(bdc_type))
+            error_message = 'object type {} is not supported'.format(bdc_type)
+            raise BilldotcomError(error_message)
 
         data = dict(
             id = id
@@ -164,7 +178,8 @@ class Session(object):
         """
 
         if bdc_type not in self.type_map:
-            raise BilldotcomError('object type {} is not supported'.format(bdc_type))
+            error_msg = 'object type {} is not supported'.format(bdc_type)
+            raise BilldotcomError(error_msg)
 
         data = dict(
             id = id
@@ -172,9 +187,11 @@ class Session(object):
 
         self.post('Crud/Delete/' + bdc_type + '.json', data)
 
-    def list(self, bdc_type, sort=[], filters=[], start=0, max=999):
+    def list(self, bdc_type, sort=[], filters=[], start=0, max=999,
+             simple_response=True):
         """Lists Billdotcom objects on the server, with optional filters.
-        The objects will be transformed into the corresponding classes and returned.
+        The objects will be transformed into the corresponding classes
+         and returned.
 
         Args:
             bdc_type: A Billdotcom object type. Supported objects are:
@@ -186,18 +203,24 @@ class Session(object):
                 * Vendor
                 * VendorCredit
 
-            sort: A list of tuples representing sort order. Use 'asc' for ascending and
+            sort: A list of tuples representing sort order. 
+            Use 'asc' for ascending and
                 'desc' for descending. For example:
                  >>> with Session() as s:
                  >>>     s.list('Vendor', sort=[('createdTime', 'desc')])
 
-            filters: A list of tuples representing filters to query with. Supported operators are:
+            filters: A list of tuples representing filters to query with.
+
+        Supported operators are:
                     =, <, >, !=, <=, >=, in, nin
-                These operators can be used with any field in the model you are querying, as long
-                as it has a data type of ID, Date, DateTime, or Enum. See the official Bill.com
-                documentation for more on this. An example of using a filter:
-                    >>> with Session() as s:
-                    >>>     s.get_list('bill', filters=[('invoiceDate', '<', date.today())])
+                These operators can be used with any field in the model you are
+                 querying, as long as it has a data type of ID, Date, DateTime,
+                 or Enum. See the official Bill.com documentation for more on
+                 this.
+        
+        An example of using a filter:
+        >>> with Session() as s:
+        >>>     s.get_list('bill', filters=[('invoiceDate', '<', date.today())])
 
             start: Start index for paging. Default 0.
 
@@ -211,7 +234,8 @@ class Session(object):
         """
 
         if bdc_type not in self.type_map:
-            raise BilldotcomError('object type {} is not supported'.format(bdc_type))
+            err_msg = 'object type {} is not supported'.format(bdc_type)
+            raise BilldotcomError(err_msg)
 
         data = dict(
             start = start,
@@ -232,6 +256,9 @@ class Session(object):
 
         response = self.post('List/{}.json'.format(bdc_type), data)
 
+        if simple_response:
+            return response
+
         return [self.type_map[row['entity']](**row) for row in response]
 
     def __enter__(self):
@@ -245,22 +272,51 @@ class Session(object):
         """Initiate a session on the server."""
 
         data = {
-            'devKey': self.appkey,
-            'userName': CONFIG.get('authentication', 'email'),
-            'password': CONFIG.get('authentication', 'password'),
-            'orgId': CONFIG.get('organization', 'id'),
+            'devKey': self.api_key,
+            'userName': self.username,
+            'password': self.password,
+            'orgId': self.org_id
         }
 
         response = https_post('Login.json', data)
 
         self.session_id = response['sessionId']
 
+    def list_orgs(self):
+        print "Because no org_id was passed in (but other credentials were),"
+        print " we'll get the list of orgs these credentials can access:"
+
+        basic_login_creds = {
+
+            'devKey'    : self.api_key,
+            'userName'  : self.username,
+            'password'  : self.password
+
+        }
+
+        org_infos = https_post('ListOrgs.json', {}, params=basic_login_creds)
+
+        title = 'Got {0} organization(s):'.format(len(org_infos))
+        print title
+        print '-'*len(title)
+        
+        for org in org_infos:
+            print '{orgId}\t{orgName}'.format(**org)
+           
+        if len(org_infos) == 1:
+            print "OK, so since there's only one organization available to " \
+                "this set of credentials, we'll just login to that org..."
+            self.org_id = org_infos[0]['orgId']
+            self.login()
+        else:
+            quit()
+                     
     def logout(self):
         """Shut down a session on the server."""
 
         if not self.session_id:
-            raise BilldotcomError("cannot logout on a session that has not logged in")
+            err_msg = "cannot logout on a session that has not logged in"
+            raise BilldotcomError(err_msg)
 
         self.post('Logout.json')
         self.session_id = None
-
